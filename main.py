@@ -118,7 +118,7 @@ def accuracy(y_true, y_pred):
 
 def save_bottleneck_features():
   model = base_model
-  generator, _ = prepare_data_generators(val_split=0, batch_size=1, class_mode=None)
+  generator, _ = prepare_data_generators(val_split=0, batch_size=1, class_mode=None, shuffle=False)
 
   print("Bottlenecking", str(len(generator.filenames)) + " features.")
 
@@ -166,7 +166,7 @@ def grayscale_preprocessing_shim(x, **kwargs):
   x = (0.21 * x[:,:,:1]) + (0.72 * x[:,:,1:2]) + (0.07 * x[:,:,-1:])
   return preprocessing_function(x, **kwargs)
 
-def prepare_data_generators(val_split, batch_size, class_mode):
+def prepare_data_generators(val_split, batch_size, class_mode, shuffle=True):
   if args.only_luma == True:
     preproc = grayscale_preprocessing_shim
   else:
@@ -188,14 +188,14 @@ def prepare_data_generators(val_split, batch_size, class_mode):
                                                       batch_size=batch_size,
                                                       class_mode=class_mode,
                                                       subset='training',
-                                                      shuffle=True)
+                                                      shuffle=shuffle)
   if val_split:
     validation_generator = train_datagen.flow_from_directory(TRAIN_DIR, 
                                                              target_size=(HEIGHT, WIDTH), 
                                                              batch_size=batch_size,
                                                              class_mode=class_mode,
                                                              subset='validation',
-                                                             shuffle=True)
+                                                             shuffle=shuffle)
   else:
     validation_generator = None
 
@@ -228,7 +228,7 @@ def build_bottleneck_top_model_inceptionv3(train_generator, class_list):
   model = Sequential()
   model.add(GlobalAveragePooling2D(input_shape=train_data_shape))
   model.add(Dense(4096, activation='relu'))
-  model.add(BatchNormalization()) #added
+  #model.add(BatchNormalization()) #added
   model.add(Dropout(args.dropout))
   model.add(Dense(num_classes, activation='sigmoid'))
 
@@ -306,7 +306,6 @@ elif args.model == "InceptionV3":
   from keras.applications.inception_v3 import preprocess_input
   preprocessing_function = preprocess_input
   base_model = InceptionV3(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
-  pass
 elif args.model == "Xception":
   from keras.applications.xception import preprocess_input
   preprocessing_function = preprocess_input
