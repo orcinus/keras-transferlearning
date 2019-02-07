@@ -4,20 +4,13 @@ from keras import backend as K
 
 # Other
 from keras import optimizers
-from keras import losses
-from keras.optimizers import SGD, Adam
 from keras.models import Sequential, Model
-from keras.callbacks import ModelCheckpoint, LearningRateScheduler
-from keras.models import load_model
 
 # Utils
-import matplotlib.pyplot as plt
-import numpy as np
-import argparse
-import random, glob
+import matplotlib as plt
+plt.use("Agg")
+import glob
 import os, sys, csv
-import cv2
-import time, datetime
 
 
 def save_class_list(class_list, model_name, dataset_name):
@@ -27,9 +20,9 @@ def save_class_list(class_list, model_name, dataset_name):
         target.write(c)
         target.write("\n")
 
-def load_class_list(class_list_file):
+def load_class_list(model_name, dataset_name):
     class_list = []
-    with open(class_list_file, 'r') as csvfile:
+    with open("./checkpoints/" + model_name + "_" + dataset_name + "_class_list.txt", 'r') as csvfile:
         file_reader = csv.reader(csvfile)
         for row in file_reader:
             class_list.append(row)
@@ -77,14 +70,14 @@ def plot_training(history):
     val_loss = history.history['val_loss']
     epochs = range(len(acc))
 
+    plt.figure()
     plt.plot(epochs, acc, 'r.')
     plt.plot(epochs, val_acc, 'r')
     plt.title('Training and validation accuracy')
-
-    # plt.figure()
-    # plt.plot(epochs, loss, 'r.')
-    # plt.plot(epochs, val_loss, 'r-')
-    # plt.title('Training and validation loss')
-    plt.show()
-
     plt.savefig('acc_vs_epochs.png')
+
+    plt.figure()
+    plt.plot(epochs, loss, 'r.')
+    plt.plot(epochs, val_loss, 'r-')
+    plt.title('Training and validation loss')
+    plt.savefig('loss_vs_epochs.png')

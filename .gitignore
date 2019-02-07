@@ -1,4 +1,5 @@
 weights/*
-Pets/*
 checkpoints/*
+bottlenecks/*
+logs/*
 *.pyc
