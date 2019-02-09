@@ -1,5 +1,7 @@
 weights/*
 checkpoints/*
 bottlenecks/*
+models/*
+predictions/*
 logs/*
 *.pyc

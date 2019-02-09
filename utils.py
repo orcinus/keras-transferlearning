@@ -11,7 +11,34 @@ import matplotlib as plt
 plt.use("Agg")
 import glob
 import os, sys, csv
+import cv2
 
+def merge_topless_top_model(model_bottom, model_top):
+  model_bottom_last_layer = model_bottom.get_layer(model_bottom.layers[-1].name)
+  model_bottom_remodel = Model(inputs=model_bottom.input, outputs=model_bottom_last_layer.output)
+
+  new_model = Sequential()
+  new_model.add(model_bottom_remodel)
+  new_model.add(model_top)
+
+  return new_model
+
+def get_square(image,square_size):
+
+    height,width=image.shape
+    if(height>width):
+      differ=height
+    else:
+      differ=width
+    differ+=4
+
+    mask = np.zeros((differ,differ), dtype="uint8")   
+    x_pos=int((differ-width)/2)
+    y_pos=int((differ-height)/2)
+    mask[y_pos:y_pos+height,x_pos:x_pos+width]=image[0:height,0:width]
+    mask=cv2.resize(mask,(square_size,square_size),interpolation=cv2.INTER_AREA)
+
+    return mask 
 
 def save_class_list(class_list, model_name, dataset_name):
     class_list.sort()

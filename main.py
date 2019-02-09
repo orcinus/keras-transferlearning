@@ -14,18 +14,21 @@ from keras.applications.nasnet import NASNetLarge, NASNetMobile
 from keras.preprocessing.image import ImageDataGenerator
 
 # Layers
-from keras.layers import Dense, Activation, Flatten, Dropout, BatchNormalization, GlobalAveragePooling2D
+from keras.layers import *
 from keras import backend as K
 
 # Other
 from keras import optimizers
 from keras import losses
+from keras import regularizers
 from keras.optimizers import SGD, Adam
 from keras.models import Sequential, Model
 from keras.callbacks import ModelCheckpoint, LearningRateScheduler
 from keras.models import load_model
 from keras.utils.np_utils import to_categorical
 from generators import BottleneckDataGenerator
+from vis.visualization import visualize_activation,visualize_saliency,overlay,visualize_cam
+from vis.utils import utils as visutils
 
 #Tensorboard
 from tensorboard import TrainValTensorBoard
@@ -35,12 +38,16 @@ import tensorflow as tf
 
 # Utils
 import numpy as np
+import random as rn
 import argparse
 import os
 import cv2
 import time
 import math
 import progressbar
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # Files
 import utils
@@ -60,6 +67,7 @@ parser.add_argument('--num_epochs', type=int, default=20, help='Number of epochs
 parser.add_argument('--mode', type=str, default="train", help='Select "train", or "predict" mode. \
                                                                Note that for prediction mode you have to specify an image to run the model on.')
 parser.add_argument('--image', type=str, default=None, help='The image you want to predict on. Only valid in "predict" mode.')
+parser.add_argument('--image_dir', type=str, default=None, help='Folder of images you want to predict on. Only valid in "predict" mode.')
 parser.add_argument('--continue_training', type=str2bool, default=False, help='Whether to continue training from a checkpoint')
 parser.add_argument('--dataset', type=str, required=True, help='Dataset you are using.')
 parser.add_argument('--resize_height', type=int, default=224, help='Height of cropped input image to network')
@@ -90,7 +98,19 @@ USE_BOTTLENECKS = args.bottlenecks
 INIT_LR = 1e-3
 WEIGHTS_PATH = "./checkpoints/" + args.model + "_model_weights.h5"
 MODEL_PATH = "./checkpoints/" + args.model + "_model.json"
+FINAL_WEIGHTS_PATH = "./models/" + args.model + "_model_weights.h5"
+FINAL_MODEL_PATH = "./models/" + args.model + "_model.json"
 
+os.environ['PYTHONHASHSEED'] = '0'
+
+# Setting the seed for numpy-generated random numbers
+np.random.seed(1337)
+
+# Setting the seed for python random numbers
+rn.seed(1337)
+
+# Setting the graph-level random seed.
+tf.set_random_seed(1337)
 
 preprocessing_function = None
 base_model = None
@@ -174,6 +194,7 @@ def prepare_data_generators(val_split, batch_size, class_mode, shuffle=True):
 
   # Prepare data generators
   train_datagen =  ImageDataGenerator(
+    #zca_whitening=True,
     preprocessing_function=preproc,
     rotation_range=args.rotation,
     shear_range=args.shear,
@@ -182,6 +203,31 @@ def prepare_data_generators(val_split, batch_size, class_mode, shuffle=True):
     vertical_flip=args.v_flip,
     validation_split=val_split
   )
+
+  #all_samples = []
+  #for catdir in next(os.walk(TRAIN_DIR))[1]:
+  #    path = os.path.join(TRAIN_DIR, catdir)
+  #    for file in next(os.walk(path))[2]:
+  #        if not file.lower().endswith(('.png', '.jpg', '.bmp', '.ppm', '.tif')):
+  #            continue
+  #        all_samples.append(os.path.join(path, file))
+  #rn.shuffle(all_samples)
+  #sample_count = int(len(all_samples)*0.01)
+  #random_sampling = all_samples[:sample_count]
+  #
+  #train_data_sample = np.ndarray((len(random_sampling), 64, 64, 3))
+  #
+  #print("Sampling", len(random_sampling), "images for ZCA whitening.")
+  #with progressbar.ProgressBar(max_value=len(random_sampling)) as bar:
+  #  for i, image_sample in enumerate(random_sampling):
+  #    image = cv2.imread(image_sample,-1)
+  #    image = np.float32(cv2.resize(image, (64, 64)))
+  #    image = preprocessing_function(image.reshape(64, 64, 3))
+  #    train_data_sample[i] = image
+  #    bar.update(i)
+  #
+  #print("Begin data generator fit.")
+  #train_datagen.fit(train_data_sample)
 
   train_generator = train_datagen.flow_from_directory(TRAIN_DIR, 
                                                       target_size=(HEIGHT, WIDTH), 
@@ -221,29 +267,44 @@ def build_bottleneck_top_model_vgg16(train_generator, class_list):
 
   return model
 
-def build_bottleneck_top_model_inceptionv3(train_generator, class_list):
-  train_data_shape = train_generator[0][0].shape[1:]
+def build_bottleneck_top_model_inceptionv3(inputs, class_list, tensor_only=False):
+  #train_data_shape = train_generator[0][0].shape[1:]
   num_classes = len(class_list)
 
-  model = Sequential()
-  model.add(GlobalAveragePooling2D(input_shape=train_data_shape))
-  model.add(Dense(4096, activation='relu'))
-  #model.add(BatchNormalization()) #added
-  model.add(Dropout(args.dropout))
-  model.add(Dense(num_classes, activation='sigmoid'))
+  #####
+  #inputs = Input(shape=train_data_shape, name='top_input')
+  x = GlobalMaxPooling2D(name='top_pooling')(inputs)
+  x = Dense(4096, activation='relu', kernel_regularizer=regularizers.l2(0.0001), name='top_dense_1')(x)
+  x = Dropout(args.dropout, name='top_dropout')(x)
+  predictions = Dense(num_classes, activation='sigmoid', name='predictions')(x)
+  if tensor_only == True:
+    return predictions
+
+  model = Model(inputs=inputs, outputs=predictions)
+  #####
+
+  #model = Sequential()
+  #model.add(GlobalMaxPooling2D(input_shape=train_data_shape))
+  #model.add(Dense(4096, kernel_regularizer=regularizers.l2(0.0001)))
+  #model.add(Activation('relu'))
+  ## model.add(BatchNormalization()) #added
+  #model.add(Dropout(args.dropout))
+  #model.add(Dense(num_classes, activation='sigmoid'))
 
   #model.add(Flatten(input_shape=train_data.shape[1:]))
   #model.add(Dense(1024, activation='relu'))
   #model.add(Dropout(args.dropout))
   #model.add(Dense(num_classes, activation='sigmoid'))
 
-  # optimizer = Adam(lr=INIT_LR, decay=INIT_LR / args.num_epochs)
-  optimizer = Adam(lr=INIT_LR)
+  optimizer = SGD(lr=INIT_LR, decay=1e-6, momentum=0.9, nesterov=True)
+  #optimizer = Adam(lr=INIT_LR, decay=INIT_LR / args.num_epochs)
+  #optimizer = Adam(lr=INIT_LR)
 
   weights = K.variable([float(1087)/808, float(1087)/1087, float(1087)/601, float(1087)/825, float(1087)/659])
   wcc = weighted_categorical_crossentropy(weights)
 
-  model.compile(optimizer=optimizer, loss="binary_crossentropy", metrics=['accuracy', recall, precision])
+  #model.compile(optimizer=optimizer, loss="binary_crossentropy", metrics=['accuracy', recall, precision])
+  model.compile(optimizer=optimizer, loss="binary_crossentropy", metrics=['accuracy'])
 
   return model
 
@@ -293,51 +354,63 @@ def weighted_categorical_crossentropy(weights):
 if args.model == "VGG16":
   from keras.applications.vgg16 import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = VGG16(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "VGG19":
   from keras.applications.vgg19 import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = VGG19(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = VGG19(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "ResNet50":
   from keras.applications.resnet50 import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "InceptionV3":
   from keras.applications.inception_v3 import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = InceptionV3(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = InceptionV3(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "Xception":
   from keras.applications.xception import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = Xception(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = Xception(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "InceptionResNetV2":
   from keras.application.inception_resnet_v2 import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = InceptionResNetV2(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = InceptionResNetV2(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "MobileNet":
   from keras.applications.mobilenet import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = MobileNet(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = MobileNet(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "DenseNet121":
   from keras.applications.densenet import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = DenseNet121(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = DenseNet121(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "DenseNet169":
   from keras.applications.densenet import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = DenseNet169(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = DenseNet169(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "DenseNet201":
   from keras.applications.densenet import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = DenseNet201(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = DenseNet201(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "NASNetLarge":
   from keras.applications.nasnet import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = NASNetLarge(weights='imagenet', include_top=True, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = NASNetLarge(weights='imagenet', include_top=True, input_shape=(HEIGHT, WIDTH, 3))
 elif args.model == "NASNetMobile":
   from keras.applications.nasnet import preprocess_input
   preprocessing_function = preprocess_input
-  base_model = NASNetMobile(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
+  if args.mode != "predict":
+    base_model = NASNetMobile(weights='imagenet', include_top=False, input_shape=(HEIGHT, WIDTH, 3))
 else:
   ValueError("The model you requested is not supported in Keras")
 
@@ -368,6 +441,8 @@ if args.mode == "train":
     os.makedirs("checkpoints")
   if not os.path.isdir("bottlenecks"):
     os.makedirs("bottlenecks")
+  if not os.path.isdir("models"):
+    os.makedirs("models")
 
   if USE_BOTTLENECKS and not args.skip_bottleneck_check:
     save_bottleneck_features()
@@ -409,28 +484,28 @@ if args.mode == "train":
 
   learning_rate_schedule = LearningRateScheduler(lr_decay)
 
-  if(os.path.isfile(WEIGHTS_PATH)):
+  if os.path.isfile(WEIGHTS_PATH):
     os.remove(WEIGHTS_PATH)
-  if(os.path.isfile(MODEL_PATH)):
+  if os.path.isfile(MODEL_PATH):
     os.remove(MODEL_PATH)
+  if os.path.isfile(FINAL_MODEL_PATH):
+    os.remove(FINAL_MODEL_PATH)
+  if os.path.isfile(FINAL_WEIGHTS_PATH):
+    os.remove(FINAL_WEIGHTS_PATH)
 
   checkpoint = ModelCheckpoint(WEIGHTS_PATH, monitor=["acc"], verbose=1, mode='max', save_weights_only=True)
   callbacks_list = [checkpoint, tensorboard]
   
   if USE_BOTTLENECKS:
-    final_model = build_bottleneck_top_model_inceptionv3(train_generator=train_generator, class_list=class_list)
-
-    model_json = final_model.to_json()
-    with open(MODEL_PATH, "w") as json_file:
-        json_file.write(model_json)
-    json_file.close()
+    train_data_shape = train_generator[0][0].shape[1:]
+    final_model = build_bottleneck_top_model_inceptionv3(Input(shape=train_data_shape, name='top_input'), class_list=class_list)
   else:
     final_model = build_non_bottleneck_top_model(base_model=base_model, class_list=class_list)  
 
-    model_json = final_model.to_json()
-    with open(modelpath, "w") as json_file:
-        json_file.write(model_json)
-    json_file.close()
+  model_json = final_model.to_json()
+  with open(MODEL_PATH, "w") as json_file:
+      json_file.write(model_json)
+  json_file.close()
 
   # This is needed because fit_generator dies if steps_per_epoch is < 1 (i.e. batch size is too big)
   # see: https://github.com/keras-team/keras/issues/3657#issuecomment-360522232
@@ -447,6 +522,24 @@ if args.mode == "train":
                                       shuffle=True, 
                                       callbacks=callbacks_list)
 
+
+  print("Saving final merged model with weights")
+  base_inputs = base_model.input
+  base_outputs = base_model.output
+  outputs = build_bottleneck_top_model_inceptionv3(base_outputs, class_list=class_list, tensor_only=True)
+  complete_model = Model(inputs=base_inputs, outputs=outputs)
+
+  #complete_model = utils.merge_topless_top_model(model_bottom=base_model, model_top=final_model)
+  model_json = complete_model.to_json()
+  with open(FINAL_MODEL_PATH, "w") as json_file:
+      json_file.write(model_json)
+  json_file.close()
+
+  complete_model.load_weights(WEIGHTS_PATH, by_name=True)
+  complete_model.save_weights(FINAL_WEIGHTS_PATH)
+
+  #complete_model.save(FINAL_MODEL_PATH)
+
   #plot_training(history)
 
 elif args.mode == "predict":
@@ -454,44 +547,97 @@ elif args.mode == "predict":
   if args.image is None or args.dataset is None:
     ValueError("You must pass an image path when using prediction mode.")
 
-  # Read in your image
-  image = cv2.imread(args.image,-1)
-  save_image = image
-  image = np.float32(cv2.resize(image, (HEIGHT, WIDTH)))
-  image = preprocessing_function(image.reshape(1, HEIGHT, WIDTH, 3))
+  images = []
+
+  if args.image_dir is None:
+    images.append(args.image)
+  else:
+    for file in next(os.walk(args.image_dir))[2]:
+      if not file.lower().endswith(('.png', '.jpg', '.bmp', '.ppm', '.tif')):
+        continue
+      images.append(os.path.join(args.image_dir, file))
+
+  images.sort()
 
   class_list = utils.load_class_list(model_name=args.model, dataset_name=DATASET_NAME)
-  
-  if USE_BOTTLENECKS:
-    bottleneck_prediction = base_model.predict(image)
-  else:
-    final_model = build_non_bottleneck_top_model(base_model=base_model, class_list=class_list)  
 
+  #final_model = load_model(FINAL_MODEL_PATH)
   from keras.models import model_from_json
-  json_file = open(MODEL_PATH, 'r')
-  loaded_model_json = json_file.read()
-  json_file.close()
-  final_model = model_from_json(loaded_model_json)
-
-  final_model.load_weights(WEIGHTS_PATH)
+  with open(FINAL_MODEL_PATH, "r") as json_file:
+    loaded_model_json = json_file.read()
+    final_model = model_from_json(loaded_model_json)
+    json_file.close()
+  final_model.load_weights(FINAL_WEIGHTS_PATH)
 
   # Run the classifier and print results
   st = time.time()
 
-  if USE_BOTTLENECKS:
-    out = final_model.predict_proba(bottleneck_prediction)
-  else:
+  # Read in images
+  for file in images:
+    print("File: ", file)
+
+    image = cv2.imread(file,-1)
+    image = np.float32(cv2.resize(image, (HEIGHT, WIDTH)))
+    image = preprocessing_function(image.reshape(1, HEIGHT, WIDTH, 3))
+
     out = final_model.predict(image)
 
-  label_weights = out[0]
-  class_prediction = list(out[0]).index(max(out[0]))
-  class_name = class_list[class_prediction]
+    label_weights = out[0]
+    class_prediction = list(out[0]).index(max(out[0]))
+    class_name = class_list[class_prediction]
+
+    print("Predicted class = ", class_name)
+    print("Labels:")
+    for index,weight in enumerate(label_weights):
+      print("\t", class_list[index], "\t-->", "{0:.2f}%".format(round(weight*100,2)))
 
   run_time = time.time()-st
 
-  print("Predicted class = ", class_name)
-  print("Labels:")
-  for index,weight in enumerate(label_weights):
-    print("\t", class_list[index], "\t-->", "{0:.2f}%".format(round(weight*100,2)))
   print("Run time = ", run_time)
   #cv2.imwrite("Predictions/" + class_name[0] + ".png", save_image)
+
+elif args.mode == "cam":
+
+  if args.image is None:
+    ValueError("You must pass an image path when using CAM mode.")
+
+  class_list = utils.load_class_list(model_name=args.model, dataset_name=DATASET_NAME)
+
+  from keras.models import model_from_json
+  with open(FINAL_MODEL_PATH, "r") as json_file:
+    loaded_model_json = json_file.read()
+    final_model = model_from_json(loaded_model_json)
+    json_file.close()
+  final_model.load_weights(FINAL_WEIGHTS_PATH)
+
+  # Utility to search for layer index by name.
+  # Alternatively we can specify this as -1 since it corresponds to the last layer.
+  layer_idx = visutils.find_layer_idx(final_model, 'predictions')
+  print("Remove Activation from Last Layer")
+  # Swap softmax with linear
+  final_model.layers[layer_idx].activation = activations.linear
+  print("Done. Now Applying changes to the model ...")
+  final_model = visutils.apply_modifications(final_model)
+
+  # Run the CAM and print results
+  st = time.time()
+
+  # Read in image
+  fig = plt.figure(figsize=(10,10))
+  img1 = image.load_img(args.image,target_size=(299,299))
+  img1 = image.img_to_array(img1)
+  img1 = np.expand_dims(img1, axis=0)
+  img1 = preprocess_input(img1)
+  layer_idx = visutils.find_layer_idx(final_model, 'predictions')
+  heatmap = []
+  img_init= visutils.load_img(args.image,target_size=(299,299))
+  for index in range(len(class_list)):
+      heatmap = visualize_cam(final_model, layer_idx, filter_indices=index, seed_input=img1[0,:,:,:])
+      ax = fig.add_subplot(int(math.ceil(len(class_list)/3.)), 3, index+1)
+      ax.set_title(class_list[index])
+      plt.imshow(overlay(img_init, heatmap))
+  plt.savefig("./predictions/"+os.path.splitext(os.path.basename(args.image))[0]+".png", dpi=144)
+
+  run_time = time.time()-st
+
+  print("Run time = ", run_time)
